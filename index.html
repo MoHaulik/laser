@@ -1,1 +1,548 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebXR AR Floor Drawing & Water Pool</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    #overlay {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 1;
+    }
+    #start-button {
+      padding: 12px 24px;
+      font-size: 18px;
+      background: rgba(72, 118, 255, 0.8);
+      color: white;
+      border: none;
+      border-radius: 30px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    #start-button:hover {
+      background: rgba(72, 118, 255, 1);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+    }
+    #status {
+      margin-top: 15px;
+      font-size: 16px;
+      background: rgba(0, 0, 0, 0.5);
+      color: white;
+      padding: 10px 15px;
+      border-radius: 12px;
+      display: none;
+      backdrop-filter: blur(5px);
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <button id="start-button">Start AR Experience</button>
+    <div id="status"></div>
+  </div>
+  
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
+    import { ARButton } from 'https://unpkg.com/three@0.150.1/examples/jsm/webxr/ARButton.js';
+    import { Water } from 'https://unpkg.com/three@0.150.1/examples/jsm/objects/Water.js';
 
+    let camera, scene, renderer;
+    let controller;
+    let reticle;
+    let hitTestSource = null;
+    let hitTestSourceRequested = false;
+    let floor;
+    let drawingActive = false;
+    let drawingPoints = [];
+    let drawingLine;
+    let drawingShape;
+    let waterPool;
+    let waterMesh;
+    let lastPoint = new THREE.Vector3();
+
+    // Sound effects
+    let audioContext;
+    let zzzSound;
+
+    init();
+
+    function init() {
+      // Scene setup
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+      // Renderer setup
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0x404040, 2);
+      scene.add(ambientLight);
+
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+      directionalLight.position.set(1, 1, 1);
+      directionalLight.castShadow = true;
+      scene.add(directionalLight);
+
+      // Start button event
+      document.getElementById('start-button').addEventListener('click', () => {
+        if (navigator.xr) {
+          navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+            if (supported) {
+              const sessionInit = { 
+                requiredFeatures: ['hit-test'],
+                optionalFeatures: ['dom-overlay'], 
+                domOverlay: { root: document.body } 
+              };
+              navigator.xr.requestSession('immersive-ar', sessionInit).then(onSessionStarted);
+            } else {
+              updateStatus('WebXR AR session is not supported on this device.');
+            }
+          });
+        } else {
+          updateStatus('WebXR is not supported in this browser.');
+        }
+      });
+
+      // Initialize audio context
+      try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        createZzzSound();
+      } catch (e) {
+        console.error('Web Audio API is not supported in this browser', e);
+      }
+
+      // Handle window resize
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    function createZzzSound() {
+      // Create a cutting/zapping sound
+      const duration = 0.5;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      
+      oscillator.type = 'sawtooth';
+      oscillator.frequency.setValueAtTime(1000, audioContext.currentTime);
+      oscillator.frequency.exponentialRampToValueAtTime(200, audioContext.currentTime + duration);
+      
+      gain.gain.setValueAtTime(0.8, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
+      
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      
+      zzzSound = {
+        play: function() {
+          const osc = audioContext.createOscillator();
+          const gainNode = audioContext.createGain();
+          
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(1000, audioContext.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(200, audioContext.currentTime + duration);
+          
+          gainNode.gain.setValueAtTime(0.8, audioContext.currentTime);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
+          
+          osc.connect(gainNode);
+          gainNode.connect(audioContext.destination);
+          
+          osc.start();
+          osc.stop(audioContext.currentTime + duration);
+        }
+      };
+    }
+
+    function updateStatus(message) {
+      const statusElement = document.getElementById('status');
+      statusElement.style.display = 'block';
+      statusElement.textContent = message;
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function onSessionStarted(session) {
+      // Set up XR session
+      renderer.xr.setReferenceSpaceType('local');
+      renderer.xr.setSession(session);
+      
+      // Hide button and show status
+      document.getElementById('start-button').style.display = 'none';
+      updateStatus('Looking for floor...');
+
+      // Create reticle for hit testing
+      createReticle();
+      
+      // Set up controller
+      setupController(session);
+
+      // Start animation loop
+      renderer.setAnimationLoop(render);
+
+      // Handle session end
+      session.addEventListener('end', onSessionEnd);
+    }
+
+    function onSessionEnd() {
+      updateStatus('AR session ended');
+      document.getElementById('start-button').style.display = 'block';
+      hitTestSource = null;
+      hitTestSourceRequested = false;
+    }
+
+    function createReticle() {
+      // Create a reticle to show where hits are detected
+      const geometry = new THREE.RingGeometry(0.03, 0.04, 32);
+      const material = new THREE.MeshBasicMaterial({ color: 0x0099ff });
+      reticle = new THREE.Mesh(geometry, material);
+      reticle.rotation.x = -Math.PI / 2;
+      reticle.matrixAutoUpdate = false;
+      reticle.visible = false;
+      scene.add(reticle);
+    }
+
+    function setupController(session) {
+      // Create controller
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('connected', (event) => {
+        const xrInputSource = event.data;
+        updateStatus(`Controller connected: ${xrInputSource.handedness}`);
+      });
+      
+      // Handle select events for drawing
+      controller.addEventListener('selectstart', onSelectStart);
+      controller.addEventListener('selectend', onSelectEnd);
+      
+      scene.add(controller);
+      
+      // Add a visual for the controller (laser pointer)
+      const controllerGeometry = new THREE.CylinderGeometry(0.002, 0.002, 0.5, 16);
+      controllerGeometry.translate(0, -0.25, 0); // Move origin to top
+      const controllerMaterial = new THREE.MeshBasicMaterial({
+        color: 0xff0000
+      });
+      const controllerMesh = new THREE.Mesh(controllerGeometry, controllerMaterial);
+      controllerMesh.rotation.x = Math.PI / 2;
+      controller.add(controllerMesh);
+    }
+
+    function onSelectStart() {
+      if (reticle.visible) {
+        if (!drawingActive) {
+          // Start a new drawing
+          drawingActive = true;
+          drawingPoints = [];
+          
+          // Get the start point from reticle position
+          const point = new THREE.Vector3();
+          reticle.getWorldPosition(point);
+          drawingPoints.push(point);
+          lastPoint.copy(point);
+          
+          // Create line material
+          const lineMaterial = new THREE.LineBasicMaterial({ 
+            color: 0xff0000,
+            linewidth: 3 
+          });
+          
+          // Create initial line with just the starting point
+          const lineGeometry = new THREE.BufferGeometry().setFromPoints(drawingPoints);
+          drawingLine = new THREE.Line(lineGeometry, lineMaterial);
+          scene.add(drawingLine);
+          
+          updateStatus('Drawing shape... Keep moving and close the loop to create water pool');
+        } else {
+          // Add a new point to the existing drawing
+          const point = new THREE.Vector3();
+          reticle.getWorldPosition(point);
+          
+          // Only add if the point is a minimum distance from the last one
+          if (point.distanceTo(lastPoint) > 0.03) {
+            drawingPoints.push(point);
+            lastPoint.copy(point);
+            
+            // Update the line geometry
+            drawingLine.geometry.dispose();
+            drawingLine.geometry = new THREE.BufferGeometry().setFromPoints(drawingPoints);
+            
+            // Check if the shape is closed
+            if (drawingPoints.length > 3) {
+              const firstPoint = drawingPoints[0];
+              if (point.distanceTo(firstPoint) < 0.1) {
+                completeDrawing();
+              }
+            }
+          }
+        }
+      }
+    }
+
+    function onSelectEnd() {
+      // This is handled in onSelectStart for continuous drawing
+    }
+
+    function completeDrawing() {
+      drawingActive = false;
+      
+      // Remove the line
+      scene.remove(drawingLine);
+      
+      // Make sure we close the loop exactly
+      drawingPoints.push(drawingPoints[0].clone());
+      
+      // Play the cutting sound
+      if (audioContext && zzzSound) {
+        // Resume audio context if it was suspended
+        if (audioContext.state === 'suspended') {
+          audioContext.resume().then(() => {
+            zzzSound.play();
+          });
+        } else {
+          zzzSound.play();
+        }
+      }
+      
+      // Create a shape from the points
+      const shape = new THREE.Shape();
+      shape.moveTo(drawingPoints[0].x, drawingPoints[0].z);
+      for (let i = 1; i < drawingPoints.length; i++) {
+        shape.lineTo(drawingPoints[i].x, drawingPoints[i].z);
+      }
+      
+      // Calculate center point and floor level
+      const center = new THREE.Vector3();
+      let minY = Infinity;
+      for (let i = 0; i < drawingPoints.length; i++) {
+        center.add(drawingPoints[i]);
+        minY = Math.min(minY, drawingPoints[i].y);
+      }
+      center.divideScalar(drawingPoints.length);
+      
+      // Create hole in the floor
+      createHole(shape, center, minY);
+      
+      // Create water pool
+      createWaterPool(shape, center, minY - 0.01);
+      
+      updateStatus('Water pool created! Draw another shape to create more pools.');
+    }
+
+    function createHole(shape, center, floorY) {
+      // Create extruded geometry for the hole
+      const extrudeSettings = {
+        depth: 0.2,
+        bevelEnabled: true,
+        bevelSegments: 2,
+        bevelSize: 0.01,
+        bevelThickness: 0.01
+      };
+      
+      const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+      
+      // Rotate and position properly for a floor hole
+      geometry.rotateX(-Math.PI / 2);
+      geometry.translate(0, floorY - 0.2, 0); // Position at floor level
+      
+      // Create a mesh with darker material for the hole
+      const material = new THREE.MeshStandardMaterial({
+        color: 0x333333,
+        roughness: 0.8,
+        metalness: 0.2,
+        side: THREE.DoubleSide
+      });
+      
+      const holeMesh = new THREE.Mesh(geometry, material);
+      scene.add(holeMesh);
+      
+      // Animate the hole opening
+      animateHoleOpening(holeMesh);
+    }
+
+    function createWaterPool(shape, center, waterY) {
+      // Create plane geometry for water
+      const waterGeometry = new THREE.ShapeGeometry(shape);
+      waterGeometry.rotateX(-Math.PI / 2);
+      waterGeometry.translate(0, waterY, 0);
+      
+      // Create water material using the Water shader
+      const waterParams = {
+        color: 0x0055aa,
+        scale: 4,
+        flowDirection: new THREE.Vector2(1, 1),
+        textureWidth: 1024,
+        textureHeight: 1024
+      };
+      
+      const water = new Water(waterGeometry, {
+        textureWidth: waterParams.textureWidth,
+        textureHeight: waterParams.textureHeight,
+        waterNormals: new THREE.TextureLoader().load('https://unpkg.com/three@0.150.1/examples/textures/waternormals.jpg', function(texture) {
+          texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+        }),
+        sunDirection: new THREE.Vector3(0, 1, 0),
+        sunColor: 0xffffff,
+        waterColor: waterParams.color,
+        distortionScale: 3.7,
+        fog: scene.fog !== undefined
+      });
+      
+      water.rotation.x = -Math.PI / 2;
+      waterMesh = water;
+      scene.add(water);
+      
+      // Animate water filling
+      animateWaterFilling(water, waterY - 0.2);
+    }
+
+    function animateHoleOpening(holeMesh) {
+      // Animate hole dropping down
+      const startY = holeMesh.position.y;
+      const targetY = startY - 0.2;
+      const duration = 1000; // ms
+      const startTime = Date.now();
+      
+      function update() {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        
+        // Ease out function
+        const easeOut = function(t) {
+          return 1 - Math.pow(1 - t, 3);
+        };
+        
+        holeMesh.position.y = startY - easeOut(progress) * 0.2;
+        
+        if (progress < 1) {
+          requestAnimationFrame(update);
+        }
+      }
+      
+      update();
+    }
+
+    function animateWaterFilling(waterMesh, startY) {
+      const targetY = startY + 0.2;
+      const duration = 2000; // ms
+      const startTime = Date.now() + 500; // Delay start to let hole animation begin
+      
+      function update() {
+        const now = Date.now();
+        const elapsed = now - startTime;
+        
+        if (elapsed > 0) {
+          const progress = Math.min(elapsed / duration, 1);
+          
+          // Ease out function
+          const easeOut = function(t) {
+            return 1 - Math.pow(1 - t, 2);
+          };
+          
+          waterMesh.position.y = startY + easeOut(progress) * 0.2;
+          
+          // Add some water ripple effect
+          if (waterMesh.material.uniforms) {
+            waterMesh.material.uniforms.time.value = performance.now() * 0.001;
+          }
+        }
+        
+        if (elapsed < duration + 500) { // Continue a bit after reaching target
+          requestAnimationFrame(update);
+        }
+      }
+      
+      update();
+    }
+
+    function render(timestamp, frame) {
+      if (frame) {
+        const referenceSpace = renderer.xr.getReferenceSpace();
+        const session = renderer.xr.getSession();
+        
+        // Update water animation if it exists
+        if (waterMesh && waterMesh.material.uniforms) {
+          waterMesh.material.uniforms.time.value = performance.now() * 0.001;
+        }
+        
+        // Handle hit testing for floor detection
+        if (!hitTestSourceRequested) {
+          session.requestReferenceSpace('viewer').then((referenceSpace) => {
+            session.requestHitTestSource({ space: referenceSpace }).then((source) => {
+              hitTestSource = source;
+            });
+          });
+
+          hitTestSourceRequested = true;
+        }
+
+        if (hitTestSource) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource);
+          
+          if (hitTestResults.length) {
+            const hit = hitTestResults[0];
+            const pose = hit.getPose(referenceSpace);
+            
+            if (pose) {
+              reticle.visible = true;
+              reticle.matrix.fromArray(pose.transform.matrix);
+              
+              // Cast a ray from controller to floor for drawing
+              if (drawingActive) {
+                // Get controller position and direction
+                const controllerWorldPos = new THREE.Vector3();
+                const controllerWorldDir = new THREE.Vector3(0, 0, -1);
+                const controllerWorldQuat = new THREE.Quaternion();
+                
+                controller.getWorldPosition(controllerWorldPos);
+                controller.getWorldQuaternion(controllerWorldQuat);
+                controllerWorldDir.applyQuaternion(controllerWorldQuat);
+                
+                // Create a ray from controller position along direction
+                const raycaster = new THREE.Raycaster(controllerWorldPos, controllerWorldDir);
+                
+                // Create a virtual plane at reticle height for intersection
+                const planeNormal = new THREE.Vector3(0, 1, 0);
+                const planeConstant = -reticle.position.y; // Assuming reticle is on the floor
+                const plane = new THREE.Plane(planeNormal, planeConstant);
+                
+                // Find intersection of ray with plane
+                const intersection = new THREE.Vector3();
+                raycaster.ray.intersectPlane(plane, intersection);
+                
+                // Move reticle to intersection point (if found)
+                if (intersection) {
+                  reticle.position.copy(intersection);
+                  reticle.updateMatrix();
+                }
+              }
+            }
+          } else {
+            reticle.visible = false;
+          }
+        }
+      }
+      
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
